@@ -1,0 +1,17 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "Rezkyoo",
+  "name_for_model": "rezkyoo",
+  "description_for_human": "Finds and books restaurant reservations by calling them for you.",
+  "description_for_model": "Actions to find nearby restaurants and call to book tables for a given date/time/party size.",
+  "contact_email": "support@rezkyoo.com",
+  "legal_info_url": "https://example.com/legal",
+  "auth": { "type": "none" },
+  "api": {
+    "type": "openapi",
+    "url": "https://unhurriedly-untyrannised-mitch.ngrok-free.dev/openapi.json"
+  },
+  "capabilities": {
+    "network_access": true
+  }
+}
