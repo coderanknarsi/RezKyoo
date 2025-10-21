@@ -1,7 +1,3 @@
-Absolutely. Here's a clear, concise project description you can drop into your GitHub repo’s `README.md` or use as a comment block so GitHub Copilot understands the context and generates relevant code:
-
----
-
 ### 🧠 Project Overview: Rezkyoo AI Restaurant Assistant
 
 This Node.js backend powers **Rezkyoo**, an AI-driven restaurant reservation assistant that integrates:
@@ -37,9 +33,7 @@ This Node.js backend powers **Rezkyoo**, an AI-driven restaurant reservation ass
 - ✅ Compatible with ChatGPT’s **OpenAPI plugin path**  
 - ✅ Serves `.well-known/ai-plugin.json` and `openapi.json` via Express  
 - ✅ Uses `ngrok` for public HTTPS access during development  
-- ❌ MCP/SSE not implemented yet (future upgrade path)
 
----
 
 ### 🛠️ Technologies Used
 
@@ -51,6 +45,3 @@ This Node.js backend powers **Rezkyoo**, an AI-driven restaurant reservation ass
 - Ngrok (for local HTTPS tunneling)  
 - OpenAPI 3.0 (for plugin schema)
 
----
-
-Let me know if you want me to generate a matching `openapi.json` or `ai-plugin.json` based on this description. I can also help you write a `package.json` or GitHub Actions workflow if you're planning to deploy this.
