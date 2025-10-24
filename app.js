@@ -1,57 +1,196 @@
 // This file defines the user interface for the Rezkyoo app inside ChatGPT.
 // It uses the components provided by the OpenAI Apps SDK.
 
-import { render, Form, TextField, Stepper, DatePicker, TimePicker, Button, Text, Card, Image, Spinner, Modal } from '@openai/apps-sdk';
+import {
+  render,
+  Form,
+  TextField,
+  Stepper,
+  DatePicker,
+  TimePicker,
+  Button,
+  Text,
+  Card,
+  Image,
+  Spinner,
+  Modal,
+} from '@openai/apps-sdk';
 
 // A simple in-memory store for our polling timer
 let pollTimer = null;
+const initialDate = new Date().toISOString().split('T')[0];
 
-// ================================================================\
-// ===== SCREEN 1: THE INITIAL SEARCH FORM ========================\
-// ================================================================\
+let formState = {
+  cuisine: 'any',
+  cuisine_notes: '',
+  location: 'near me',
+  party_size: 2,
+  date: initialDate,
+  time: '19:00',
+  intent: 'specific_time',
+};
+
+// ================================================================
+// ===== SCREEN 1: THE INITIAL SEARCH FORM ========================
+// ================================================================
 
 async function main() {
   // Clear any existing timers when the app re-launches
   if (pollTimer) clearInterval(pollTimer);
-  
+  renderSearchForm();
+}
+
+function renderSearchForm(overrides = {}, options = {}) {
+  formState = { ...formState, ...overrides };
+  const { error } = options;
+
   render(
     <Form
       title="Find a Reservation with Rezkyoo"
-      description="Tell us what you're looking for, and our AI will call restaurants to find availability for you."
+      description="Provide a few details and we'll handle the outreach."
       onSubmit={(formData) => handleSearchSubmit(formData)}
     >
-      <TextField name="cuisine" label="Cuisine or Restaurant Type" placeholder="e.g., steakhouse, Italian" required={true} />
-      <TextField name="location" label="Location" placeholder="e.g., Scottsdale, AZ" defaultValue="near me" required={true} />
-      <Stepper name="party_size" label="Party Size" defaultValue={2} min={1} max={20} />
-      <DatePicker name="date" label="Date" defaultValue={new Date()} />
-      <TimePicker name="time" label="Time" defaultValue="19:00" />
-      <input type="hidden" name="intent" value="specific_time" />
-      <Button type="submit">Find Availability</Button>
-    </Form>
+      {error && (
+        <Text style={{ color: '#d92d20' }}>{error}</Text>
+      )}
+
+      <Card title="When would you like to dine?">
+        <label htmlFor="intent">Timing preference</label>
+        <select
+          id="intent"
+          name="intent"
+          defaultValue={formState.intent}
+          required
+        >
+          <option value="next_available">Next available table</option>
+          <option value="specific_time">Book a specific time</option>
+        </select>
+
+        <DatePicker
+          name="date"
+          label="Date"
+          defaultValue={formState.date}
+          required
+        />
+        <TimePicker
+          name="time"
+          label="Preferred Time"
+          defaultValue={formState.time}
+        />
+        <Text size="small">
+          We only use the time field when “Book a specific time” is selected. Choose “Next available table” to let Rezkyoo find the soonest seating.
+        </Text>
+      </Card>
+
+      <Card title="Party & cuisine">
+        <Stepper
+          name="party_size"
+          label="Party Size"
+          defaultValue={formState.party_size}
+          min={1}
+          max={20}
+        />
+
+        <label htmlFor="cuisine">Cuisine preference</label>
+        <select
+          id="cuisine"
+          name="cuisine"
+          defaultValue={formState.cuisine}
+          required
+        >
+          <option value="any">Any cuisine / surprise me</option>
+          <option value="steakhouse">Steakhouse</option>
+          <option value="italian">Italian</option>
+          <option value="seafood">Seafood</option>
+          <option value="asian">Asian fusion</option>
+          <option value="mexican">Mexican</option>
+          <option value="vegetarian">Vegetarian / vegan friendly</option>
+        </select>
+        <TextField
+          name="cuisine_notes"
+          label="Need something specific?"
+          placeholder="Optional: add dietary notes or a specific restaurant"
+          defaultValue={formState.cuisine_notes}
+        />
+      </Card>
+
+      <Card title="Where should we search?">
+        <TextField
+          name="location"
+          label="Location"
+          placeholder="e.g., Scottsdale, AZ"
+          defaultValue={formState.location}
+          required
+        />
+      </Card>
+
+      <Button type="submit">Start calling restaurants</Button>
+    </Form>,
   );
 }
 
-// ================================================================\
-// ===== STEP 2: SUBMIT SEARCH & START POLLING ====================\
-// ================================================================\
+// ================================================================
+// ===== STEP 2: SUBMIT SEARCH & START POLLING ====================
+// ================================================================
 
 async function handleSearchSubmit(formData) {
   if (pollTimer) clearInterval(pollTimer);
-  
+
+  const locationInput = typeof formData.location === 'string' ? formData.location.trim() : '';
+  const cuisineNotesInput = typeof formData.cuisine_notes === 'string' ? formData.cuisine_notes.trim() : '';
+  const intentInput = typeof formData.intent === 'string' ? formData.intent : formState.intent;
+  const timeInput = typeof formData.time === 'string' ? formData.time : '';
+  const partySizeInput = parseInt(formData.party_size, 10);
+
+  formState = {
+    ...formState,
+    cuisine: formData.cuisine || formState.cuisine,
+    cuisine_notes: cuisineNotesInput,
+    location: locationInput || formState.location,
+    party_size: Number.isNaN(partySizeInput) ? formState.party_size : Math.max(1, partySizeInput),
+    date: formData.date || formState.date,
+    time: timeInput || formState.time,
+    intent: intentInput === 'next_available' ? 'next_available' : 'specific_time',
+  };
+
+  if (!formState.location) {
+    return renderSearchForm({}, { error: 'Please provide a location so we know where to search.' });
+  }
+
+  if (!formState.date) {
+    return renderSearchForm({}, { error: 'Please choose the date you want to dine.' });
+  }
+
+  if (formState.intent === 'specific_time' && !formState.time) {
+    return renderSearchForm({}, { error: 'Please choose a preferred dining time or switch to “Next available table”.' });
+  }
+
+  const payload = {
+    cuisine: formState.cuisine_notes ? formState.cuisine_notes : formState.cuisine,
+    location: formState.location,
+    party_size: formState.party_size,
+    date: formState.date,
+    intent: formState.intent,
+  };
+
+  if (formState.intent === 'specific_time') {
+    payload.time = formState.time;
+  }
+
   render(<Spinner label="Finding restaurants and starting the calls..." />);
-  
+
   try {
     const searchResponse = await fetch('/restaurants/search_and_call', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(formData),
+      body: JSON.stringify(payload),
     });
 
     if (!searchResponse.ok) {
       const error = await searchResponse.json();
-      return render(<Text>Error: {error.message || "Could not start search."}</Text>);
+      return render(<Text>Error: {error.message || 'Could not start search.'}</Text>);
     }
-    
+
     // Store the static restaurant data and query data
     const { batchId, mapUrl, restaurants, query } = await searchResponse.json();
 
@@ -64,9 +203,9 @@ async function handleSearchSubmit(formData) {
   }
 }
 
-// ================================================================\
-// ===== STEP 3: POLLING & RENDERING RESULTS ======================\
-// ================================================================\
+// ================================================================
+// ===== STEP 3: POLLING & RENDERING RESULTS ======================
+// ================================================================
 
 async function pollForResults(batchId, mapUrl, staticRestaurants, query) {
   try {
@@ -75,13 +214,14 @@ async function pollForResults(batchId, mapUrl, staticRestaurants, query) {
       clearInterval(pollTimer);
       return render(<Text>Error: Could not retrieve batch status.</Text>);
     }
-    
+
     const { status: batchStatus, items: liveCallItems } = await statusResponse.json();
-    
+
     // --- This is the key logic ---
     // Merge the static data (name, rating) with the live call data (status, result)
     const mergedItems = staticRestaurants.map(staticResto => {
-      const liveData = liveCallItems.find(live => live.phone === staticResto.formatted_phone_number);
+      const livePhone = staticResto.international_phone_number || staticResto.formatted_phone_number;
+      const liveData = liveCallItems.find(live => live.phone === livePhone);
       return {
         ...staticResto, // name, rating, user_ratings_total
         ...liveData    // id, status, result, raw
@@ -90,7 +230,7 @@ async function pollForResults(batchId, mapUrl, staticRestaurants, query) {
     // -----------------------------
 
     renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus);
-    
+
     if (batchStatus === 'completed') {
       clearInterval(pollTimer);
     }
@@ -100,22 +240,22 @@ async function pollForResults(batchId, mapUrl, staticRestaurants, query) {
   }
 }
 
-// ================================================================\
-// ===== SCREEN 2: THE DYNAMIC RESULTS SCREEN =====================\
-// ================================================================\
+// ================================================================
+// ===== SCREEN 2: THE DYNAMIC RESULTS SCREEN =====================
+// ================================================================
 
 function renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus) {
   render(
     <Card>
-      <Image src={mapUrl} alt="Map of restaurants" />
+      {mapUrl && <Image src={mapUrl} alt="Map of restaurants" />}
       {batchStatus !== 'completed' && <Spinner label="Live status: Calls in progress..." />}
       {batchStatus === 'completed' && <Text>✅ All calls are complete.</Text>}
-      
+
       {mergedItems.map((item, index) => (
         <Card key={item.id || index} title={item.name}>
           <Text>{item.rating} ⭐ ({item.user_ratings_total} reviews)</Text>
           <Text>Status: {item.status || 'Pending...'}</Text>
-          
+
           {/* A call is completed and has a result */}
           {item.status === 'completed' && item.result && (
             <Card>
@@ -123,11 +263,11 @@ function renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus) {
               {item.result.outcome === 'available' && <Button onClick={() => renderBookingForm(item, query)}>Book Now</Button>}
               {item.result.outcome === 'alternative_offered' && <Text>Offered: {item.result.alternative_time}</Text>}
               {item.result.outcome === 'credit_card_required' && <Text>💳 Requires Credit Card to hold.</Text>}
-              
+
               {/* Show Transcript Button */}
               {item.raw && (
-                <Button 
-                  variant="secondary" 
+                <Button
+                  variant="secondary"
                   onClick={() => renderTranscript(item.name, item.raw)}
                 >
                   View Transcript
@@ -135,55 +275,55 @@ function renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus) {
               )}
             </Card>
           )}
-          
+
           {/* Handle other statuses */}
           {item.status === 'machine_detected' && <Text>Outcome: Answering machine, skipped.</Text>}
           {item.status === 'error' && <Text>Outcome: Call failed.</Text>}
           {item.status === 'skipped' && <Text>Outcome: Skipped (on Do Not Call list).</Text>}
         </Card>
       ))}
-      
+
       {/* Show 'Search More' button only when the current batch is done */}
       {batchStatus === 'completed' && (
          <Button variant="secondary" onClick={() => handleSearchMore(batchId)}>Search More</Button>
       )}
-    </Card>
+    </Card>,
   );
 }
 
-// ================================================================\
-// ===== MODAL: VIEW TRANSCRIPT ===================================\
-// ================================================================\
+// ================================================================
+// ===== MODAL: VIEW TRANSCRIPT ===================================
+// ================================================================
 
 function renderTranscript(name, transcript) {
   render(
     <Modal title={`Transcript for ${name}`} onClose={() => { /* This would close the modal */ }}>
       <Text>{transcript || "No transcript available."}</Text>
-    </Modal>
+    </Modal>,
   );
 }
 
-// ================================================================\
-// ===== FLOW: SEARCH MORE ========================================\
-// ================================================================\
+// ================================================================
+// ===== FLOW: SEARCH MORE ========================================
+// ================================================================
 
 async function handleSearchMore(batchId) {
   if (pollTimer) clearInterval(pollTimer);
-  
+
   render(<Spinner label="Finding and calling more restaurants..." />);
-  
+
   try {
     const searchResponse = await fetch('/restaurants/search_more', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ original_batch_id: batchId }),
+      body: JSON.stringify({ batchId }),
     });
-    
+
     if (!searchResponse.ok) {
       const error = await searchResponse.json();
-      return render(<Text>Error: {error.message || "No more restaurants to search."}</Text>);
+      return render(<Text>Error: {error.message || 'No more restaurants to search.'}</Text>);
     }
-    
+
     // Re-start the polling loop with the new data
     const { batchId: newBatchId, mapUrl, restaurants, query } = await searchResponse.json();
     pollTimer = setInterval(() => pollForResults(newBatchId, mapUrl, restaurants, query), 2500);
@@ -193,9 +333,9 @@ async function handleSearchMore(batchId) {
   }
 }
 
-// ================================================================\
-// ===== FLOW: BOOKING (STUBBED) ==================================\
-// ================================================================\
+// ================================================================
+// ===== FLOW: BOOKING (STUBBED) ==================================
+// ================================================================
 
 function renderBookingForm(restaurantItem, query) {
   render(
@@ -207,7 +347,7 @@ function renderBookingForm(restaurantItem, query) {
       <TextField name="user_name" label="Full Name" required={true} />
       <TextField name="user_phone" label="Contact Phone Number" required={true} />
       <Button type="submit">Confirm Reservation</Button>
-    </Form>
+    </Form>,
   );
 }
 
@@ -216,3 +356,5 @@ async function handleConfirmBooking(restaurantItem, query, bookingData) {
   // This is a stub. We need to implement the /reservations/book endpoint.
   render(<Text>✅ Booking feature not yet implemented.</Text>);
 }
+
+main();

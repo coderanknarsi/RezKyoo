@@ -100,6 +100,69 @@ app.get('/call', (_req, res) => {
   });
 });
 
+const TOOL_DEFINITIONS = {
+  find_restaurants: {
+    description: 'Search restaurants near a location with optional cuisine filter.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        location: {
+          type: 'string',
+          description: 'City, neighborhood, or address to search near.'
+        },
+        cuisine: {
+          type: 'string',
+          description: 'Optional cuisine or keyword to refine the search.'
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+          description: 'Maximum number of restaurants to return (default 5).'
+        }
+      },
+      required: ['location']
+    }
+  }
+};
+
+const TOOL_HANDLERS = {
+  find_restaurants: handleFindRestaurantsTool
+};
+
+app.get('/tools', (_req, res) => {
+  const tools = Object.entries(TOOL_DEFINITIONS).map(([id, meta]) => ({
+    tool_id: id,
+    name: id,
+    description: meta.description,
+    input_schema: meta.inputSchema
+  }));
+
+  res.json({ ok: true, tools });
+});
+
+app.post('/call', async (req, res) => {
+  const { tool_id: toolId, input } = req.body || {};
+
+  if (!toolId) {
+    return res.status(400).json({ ok: false, error: "Missing 'tool_id' in request body." });
+  }
+
+  const handler = TOOL_HANDLERS[toolId];
+  if (!handler) {
+    return res.status(404).json({ ok: false, error: `Unknown tool_id '${toolId}'.` });
+  }
+
+  try {
+    const result = await handler(input || {});
+    res.json({ ok: true, tool_id: toolId, result });
+  } catch (error) {
+    console.error(`[Tool Error] ${toolId}:`, error.response?.data || error.message || error);
+    const message = error?.message || 'Internal tool execution error.';
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
 //================================================================//
 // ===== HELPER: Geocoding & Timezone ============================
 //================================================================//
@@ -292,6 +355,75 @@ function generateStaticMapUrl(locations) {
     .filter(Boolean).join('&');
   if (!markers) return null;
   return `https://maps.googleapis.com/maps/api/staticmap?size=600x400&${markers}&key=${GOOGLE_MAPS_API_KEY}`;
+}
+
+//================================================================//
+// ===== HELPER: Tool Adapter ====================================
+//================================================================//
+function normalizeToolLimit(limit) {
+  const DEFAULT_LIMIT = 5;
+  if (limit === undefined || limit === null) return DEFAULT_LIMIT;
+  const parsed = parseInt(limit, 10);
+  if (Number.isNaN(parsed)) return DEFAULT_LIMIT;
+  return Math.max(1, Math.min(20, parsed));
+}
+
+function buildRestaurantToolResult(place) {
+  return {
+    name: place.name,
+    phone: place.international_phone_number || null,
+    rating: place.rating ?? null,
+    review_count: place.user_ratings_total ?? null,
+    address: place.vicinity || null,
+    types: place.types || [],
+    place_id: place.place_id,
+    maps_url: place.place_id ? `https://www.google.com/maps/place/?q=place_id:${place.place_id}` : null,
+    open_now: place.opening_hours?.open_now ?? null
+  };
+}
+
+async function handleFindRestaurantsTool(input = {}) {
+  if (!GOOGLE_MAPS_API_KEY) {
+    throw new Error('GOOGLE_MAPS_API_KEY is not configured on the server.');
+  }
+
+  const location = typeof input.location === 'string' ? input.location.trim() : '';
+  const cuisine = typeof input.cuisine === 'string' ? input.cuisine.trim() : '';
+  const limit = normalizeToolLimit(input.limit);
+
+  if (!location) {
+    throw new Error("The 'location' field is required.");
+  }
+
+  const query = cuisine ? `${cuisine} restaurants in ${location}` : `restaurants in ${location}`;
+  console.log(`[Tool] find_restaurants query="${query}" limit=${limit}`);
+
+  try {
+    const searchResponse = await googleMapsClient.textSearch({
+      params: { query, key: GOOGLE_MAPS_API_KEY }
+    });
+
+    const places = searchResponse?.data?.results || [];
+    if (!places.length) {
+      return {
+        query: { location, cuisine: cuisine || null, limit },
+        count: 0,
+        results: []
+      };
+    }
+
+    const detailedPlaces = await getAndRankPlaceDetails(places, Math.min(limit * 2, 20));
+    const trimmed = detailedPlaces.slice(0, limit).map(buildRestaurantToolResult);
+
+    return {
+      query: { location, cuisine: cuisine || null, limit },
+      count: trimmed.length,
+      results: trimmed
+    };
+  } catch (error) {
+    console.error('[Tool] find_restaurants failed:', error.response?.data || error.message || error);
+    throw new Error('Failed to search for restaurants. Please try again.');
+  }
 }
 
 //================================================================//
