@@ -37,11 +37,16 @@ This Node.js backend powers **Rezkyoo**, an AI-driven restaurant reservation ass
 
 ### 🛠️ Technologies Used
 
-- Node.js + Express  
-- Telnyx SDK  
-- Google Maps Services SDK  
-- OpenAI SDK (Whisper + GPT-4o)  
-- Firebase Admin SDK  
-- Ngrok (for local HTTPS tunneling)  
+- Node.js + Express
+- Telnyx SDK
+- Google Maps Services SDK
+- OpenAI SDK (Whisper + GPT-4o)
+- Firebase Admin SDK
+- Ngrok (for local HTTPS tunneling)
 - OpenAPI 3.0 (for plugin schema)
+
+### 🔑 Environment Variables
+
+- `GOOGLE_MAPS_API_KEY` – enables the backend to generate static map images for the widget.
+- `DEV_SIMULATE_CALLS` – optional flag (`true`/`false`) that simulates call outcomes without contacting Telnyx, useful for UI testing.
 

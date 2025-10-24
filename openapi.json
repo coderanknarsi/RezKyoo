@@ -69,7 +69,7 @@
     "schemas": {
       "SearchAndCallRequest": {
         "type": "object",
-        "required": ["cuisine", "location", "party_size", "date", "time"],
+        "required": ["cuisine", "location", "party_size", "date", "intent"],
         "properties": {
           "cuisine": { "type": "string" },
           "location": { "type": "string" },
@@ -78,7 +78,17 @@
           "time": { "type": "string" },
           "intent": { "type": "string" },
           "max_calls": { "type": "integer" }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "intent": { "const": "specific_time" } }
+            },
+            "then": {
+              "required": ["time"]
+            }
+          }
+        ]
       },
       "SearchAndCallResponse": { "type": "object" },
       "BookingRequest": {

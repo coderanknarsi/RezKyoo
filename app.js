@@ -18,6 +18,7 @@ import {
 
 // A simple in-memory store for our polling timer
 let pollTimer = null;
+let currentBatchState = null;
 const initialDate = new Date().toISOString().split('T')[0];
 
 let formState = {
@@ -36,7 +37,11 @@ let formState = {
 
 async function main() {
   // Clear any existing timers when the app re-launches
-  if (pollTimer) clearInterval(pollTimer);
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  currentBatchState = null;
   renderSearchForm();
 }
 
@@ -134,7 +139,11 @@ function renderSearchForm(overrides = {}, options = {}) {
 // ================================================================
 
 async function handleSearchSubmit(formData) {
-  if (pollTimer) clearInterval(pollTimer);
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  currentBatchState = null;
 
   const locationInput = typeof formData.location === 'string' ? formData.location.trim() : '';
   const cuisineNotesInput = typeof formData.cuisine_notes === 'string' ? formData.cuisine_notes.trim() : '';
@@ -192,26 +201,46 @@ async function handleSearchSubmit(formData) {
     }
 
     // Store the static restaurant data and query data
-    const { batchId, mapUrl, restaurants, query } = await searchResponse.json();
+    const { batchId, mapUrl, restaurants, query, hasMore } = await searchResponse.json();
 
-    // Start polling for results
-    // We pass the static data to the poller so it can merge it
-    pollTimer = setInterval(() => pollForResults(batchId, mapUrl, restaurants, query), 2500);
+    startPollingBatch({ batchId, mapUrl, restaurants, query, hasMore: Boolean(hasMore) });
 
   } catch (err) {
     render(<Text>Error: {err.message}</Text>);
   }
 }
 
+function startPollingBatch(state) {
+  currentBatchState = state;
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  pollForResults(state);
+  pollTimer = setInterval(() => {
+    if (currentBatchState) {
+      pollForResults(currentBatchState);
+    }
+  }, 2500);
+}
+
 // ================================================================
 // ===== STEP 3: POLLING & RENDERING RESULTS ======================
 // ================================================================
 
-async function pollForResults(batchId, mapUrl, staticRestaurants, query) {
+function normalizePhone(value) {
+  if (!value || typeof value !== 'string') return null;
+  const digits = value.replace(/[^+\d]/g, '');
+  return digits || null;
+}
+
+async function pollForResults(state) {
+  const { batchId, mapUrl, restaurants: staticRestaurants, query, hasMore } = state;
   try {
     const statusResponse = await fetch(`/status/${batchId}`);
     if (!statusResponse.ok) {
       clearInterval(pollTimer);
+      pollTimer = null;
       return render(<Text>Error: Could not retrieve batch status.</Text>);
     }
 
@@ -220,22 +249,49 @@ async function pollForResults(batchId, mapUrl, staticRestaurants, query) {
     // --- This is the key logic ---
     // Merge the static data (name, rating) with the live call data (status, result)
     const mergedItems = staticRestaurants.map(staticResto => {
-      const livePhone = staticResto.international_phone_number || staticResto.formatted_phone_number;
-      const liveData = liveCallItems.find(live => live.phone === livePhone);
+      const staticPlaceId = staticResto.placeId || staticResto.place_id || null;
+      const staticPhones = [
+        staticResto.phone_normalized,
+        staticResto.international_phone_number,
+        staticResto.formatted_phone_number,
+        staticResto.phone_display,
+      ].map(normalizePhone).filter(Boolean);
+
+      const liveData = liveCallItems.find(live => {
+        if (staticPlaceId && (live.placeId === staticPlaceId || live.place_id === staticPlaceId)) {
+          return true;
+        }
+
+        const livePhones = [live.phone_normalized, live.phone, live.phone_display]
+          .map(normalizePhone)
+          .filter(Boolean);
+        return staticPhones.some(phone => livePhones.includes(phone));
+      });
+
       return {
-        ...staticResto, // name, rating, user_ratings_total
-        ...liveData    // id, status, result, raw
+        ...staticResto,
+        ...(liveData ? {
+          id: liveData.id,
+          status: liveData.status,
+          result: liveData.result,
+          raw: liveData.raw,
+          placeId: liveData.placeId || staticPlaceId,
+          phone_normalized: liveData.phone_normalized || staticResto.phone_normalized,
+        } : {}),
       };
     });
     // -----------------------------
 
-    renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus);
+    currentBatchState = { ...state, restaurants: staticRestaurants, hasMore };
+    renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus, hasMore);
 
     if (batchStatus === 'completed') {
       clearInterval(pollTimer);
+      pollTimer = null;
     }
   } catch (err) {
     clearInterval(pollTimer);
+    pollTimer = null;
     render(<Text>Error polling for results: {err.message}</Text>);
   }
 }
@@ -244,15 +300,15 @@ async function pollForResults(batchId, mapUrl, staticRestaurants, query) {
 // ===== SCREEN 2: THE DYNAMIC RESULTS SCREEN =====================
 // ================================================================
 
-function renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus) {
+function renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus, hasMore) {
   render(
     <Card>
-      {mapUrl && <Image src={mapUrl} alt="Map of restaurants" />}
+      {mapUrl ? <Image src={mapUrl} alt="Map of restaurants" /> : null}
       {batchStatus !== 'completed' && <Spinner label="Live status: Calls in progress..." />}
       {batchStatus === 'completed' && <Text>✅ All calls are complete.</Text>}
 
       {mergedItems.map((item, index) => (
-        <Card key={item.id || index} title={item.name}>
+        <Card key={item.id || item.placeId || index} title={item.name}>
           <Text>{item.rating} ⭐ ({item.user_ratings_total} reviews)</Text>
           <Text>Status: {item.status || 'Pending...'}</Text>
 
@@ -283,8 +339,8 @@ function renderResultsScreen(batchId, mapUrl, mergedItems, query, batchStatus) {
         </Card>
       ))}
 
-      {/* Show 'Search More' button only when the current batch is done */}
-      {batchStatus === 'completed' && (
+      {/* Show 'Search More' button only when the current batch is done and more restaurants remain */}
+      {batchStatus === 'completed' && hasMore && (
          <Button variant="secondary" onClick={() => handleSearchMore(batchId)}>Search More</Button>
       )}
     </Card>,
@@ -308,7 +364,11 @@ function renderTranscript(name, transcript) {
 // ================================================================
 
 async function handleSearchMore(batchId) {
-  if (pollTimer) clearInterval(pollTimer);
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  currentBatchState = null;
 
   render(<Spinner label="Finding and calling more restaurants..." />);
 
@@ -325,8 +385,8 @@ async function handleSearchMore(batchId) {
     }
 
     // Re-start the polling loop with the new data
-    const { batchId: newBatchId, mapUrl, restaurants, query } = await searchResponse.json();
-    pollTimer = setInterval(() => pollForResults(newBatchId, mapUrl, restaurants, query), 2500);
+    const { batchId: newBatchId, mapUrl, restaurants, query, hasMore } = await searchResponse.json();
+    startPollingBatch({ batchId: newBatchId, mapUrl, restaurants, query, hasMore: Boolean(hasMore) });
 
   } catch (err) {
     render(<Text>Error: {err.message}</Text>);

@@ -53,6 +53,7 @@ const NGROK_URL = process.env.NGROK_URL || process.env.PUBLIC_BASE_URL;
 const TELNYX_CALL_CONTROL_ID = process.env.TELNYX_CONNECTION_ID;
 const TELNYX_PHONE_NUMBER = process.env.TELNYX_PHONE_NUMBER;
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const DEV_SIMULATE_CALLS = process.env.DEV_SIMULATE_CALLS === 'true';
 
 const MAX_CALLS_DEFAULT = parseInt(process.env.MAX_CALLS_DEFAULT || '5', 10);
 const MAX_CALLS_HARD = parseInt(process.env.MAX_CALLS_HARD || '8', 10);
@@ -341,20 +342,95 @@ function isRestaurantOpenAt(opening_hours, date, time, timeZoneId) {
 //================================================================//
 // ===== HELPER: Google Maps Static Image ========================
 //================================================================//
-function generateStaticMapUrl(locations) {
-  if (!locations || locations.length === 0) return null;
+function generateStaticMapUrl(locations, limit = 10) {
+  if (!GOOGLE_MAPS_API_KEY || !locations || locations.length === 0) return null;
   const markers = locations
-    .map((loc, i) => {
+    .map((loc, index) => {
       const lat = loc?.geometry?.location?.lat ?? loc?.lat;
       const lng = loc?.geometry?.location?.lng ?? loc?.lng;
       if (lat != null && lng != null) {
-        return `markers=color:red%7Clabel:${i + 1}%7C${lat},${lng}`;
+        const label = index < 9 ? index + 1 : '';
+        const labelSegment = label ? `%7Clabel:${label}` : '';
+        return `markers=color:red${labelSegment}%7C${lat},${lng}`;
       }
       return null;
     })
-    .filter(Boolean).join('&');
+    .filter(Boolean)
+    .slice(0, limit)
+    .join('&');
   if (!markers) return null;
-  return `https://maps.googleapis.com/maps/api/staticmap?size=600x400&${markers}&key=${GOOGLE_MAPS_API_KEY}`;
+  return `https://maps.googleapis.com/maps/api/staticmap?size=640x400&scale=2&${markers}&key=${GOOGLE_MAPS_API_KEY}`;
+}
+
+function normalizePhoneNumber(phone) {
+  if (!phone) return null;
+  const digits = phone.replace(/[^+\d]/g, '');
+  return digits || null;
+}
+
+function buildClientRestaurantPayload(place) {
+  const displayPhone = place.international_phone_number || place.formatted_phone_number || null;
+  const normalizedPhone = normalizePhoneNumber(displayPhone);
+  return {
+    placeId: place.place_id || null,
+    place_id: place.place_id || null,
+    name: place.name,
+    rating: place.rating ?? null,
+    user_ratings_total: place.user_ratings_total ?? null,
+    international_phone_number: place.international_phone_number || null,
+    formatted_phone_number: place.formatted_phone_number || place.international_phone_number || null,
+    formatted_address: place.vicinity || place.formatted_address || null,
+    geometry: place.geometry || null,
+    types: place.types || [],
+    business_status: place.business_status || null,
+    phone_normalized: normalizedPhone,
+    phone_display: displayPhone,
+  };
+}
+
+function simulateCallLifecycle(callRef, restaurant, query, index = 0) {
+  const startDelay = 700 + index * 400;
+  const completionDelay = startDelay + 1400;
+
+  setTimeout(() => {
+    callRef.update({
+      status: 'in_progress',
+      'result.ai_summary': `Calling ${restaurant.name} for a table...`
+    }).catch(err => {
+      console.error(`[Simulated Call] Failed to mark in-progress for ${restaurant.name}:`, err.message || err);
+    });
+  }, startDelay);
+
+  setTimeout(() => {
+    const available = Math.random() > 0.4;
+    const alternative = !available && Math.random() > 0.5;
+    const result = available
+      ? {
+          outcome: 'available',
+          ai_summary: `They can seat ${query.party_size} on ${query.date}${query.time ? ` at ${query.time}` : ''}.`,
+          credit_card_required: false,
+        }
+      : alternative
+        ? {
+            outcome: 'alternative_offered',
+            ai_summary: `They offered a nearby time for ${query.party_size}.`,
+            alternative_time: query.time ? `${query.time.replace(/:(\d\d)$/, ':30')}` : 'Next available',
+            credit_card_required: false,
+          }
+        : {
+            outcome: 'no_answer',
+            ai_summary: 'No one picked up; try again later.',
+            credit_card_required: false,
+          };
+
+    callRef.update({
+      status: 'completed',
+      raw: result.outcome === 'available' ? 'Great! We have a table ready for you.' : 'No luck on that call.',
+      result,
+    }).catch(err => {
+      console.error(`[Simulated Call] Failed to complete call for ${restaurant.name}:`, err.message || err);
+    });
+  }, completionDelay);
 }
 
 //================================================================//
@@ -579,19 +655,24 @@ async function getAndRankPlaceDetails(places, limit) {
 // ===== HELPER: Start Batch Call Function =======================
 //================================================================//
 async function startBatchCall(restaurantsToCall, query, batchId, ngrokUrl) {
-  if (!ngrokUrl) {
+  if (!ngrokUrl && !DEV_SIMULATE_CALLS) {
     console.error("FATAL: NGROK_URL is not set. Cannot create webhooks.");
     return;
   }
-  const callPromises = restaurantsToCall.map(restaurant => {
+  const callPromises = restaurantsToCall.map(async (restaurant, index) => {
     const callRef = db.collection('calls').doc();
     const callControlId = callRef.id;
+    const displayPhone = restaurant.international_phone_number || restaurant.formatted_phone_number || null;
+    const normalizedPhone = normalizePhoneNumber(displayPhone);
     const callData = {
       id: callControlId,
       batchId: batchId,
       restaurantName: restaurant.name,
-      phone: restaurant.international_phone_number,
-      status: 'initiated',
+      phone: displayPhone,
+      phone_normalized: normalizedPhone,
+      placeId: restaurant.place_id || null,
+      call_control_id: callControlId,
+      status: DEV_SIMULATE_CALLS ? 'pending' : 'initiated',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       query: query,
       raw: null,
@@ -601,25 +682,30 @@ async function startBatchCall(restaurantsToCall, query, batchId, ngrokUrl) {
         credit_card_required: false
       }
     };
-    return callRef.set(callData)
-      .then(() => {
-        return telnyx.calls.create({
-          connection_id: TELNYX_CALL_CONTROL_ID,
-          to: restaurant.international_phone_number,
-          from: TELNYX_PHONE_NUMBER,
-          webhook_url: `${ngrokUrl}/voice/webhook`, // Use the full URL from .env
-          webhook_url_method: "POST",
-          call_control_id: callControlId
-        });
-      })
-      .catch(err => {
-        console.error(`[Call Start Error] Failed to initiate call to ${restaurant.name}:`, err.response?.data?.errors || err.message);
-        return callRef.update({
-          status: 'failed',
-          'result.outcome': 'no_reservation_line',
-          'result.ai_summary': 'Failed to initiate the call (e.g., invalid number).'
-        });
+
+    try {
+      await callRef.set(callData);
+      if (DEV_SIMULATE_CALLS) {
+        simulateCallLifecycle(callRef, restaurant, query, index);
+        return;
+      }
+
+      await telnyx.calls.create({
+        connection_id: TELNYX_CALL_CONTROL_ID,
+        to: restaurant.international_phone_number,
+        from: TELNYX_PHONE_NUMBER,
+        webhook_url: `${ngrokUrl}/voice/webhook`,
+        webhook_url_method: "POST",
+        call_control_id: callControlId
       });
+    } catch (err) {
+      console.error(`[Call Start Error] Failed to initiate call to ${restaurant.name}:`, err.response?.data?.errors || err.message || err);
+      await callRef.update({
+        status: 'failed',
+        'result.outcome': 'no_reservation_line',
+        'result.ai_summary': 'Failed to initiate the call (e.g., invalid number).'
+      });
+    }
   });
   return Promise.allSettled(callPromises);
 }
@@ -685,6 +771,8 @@ app.post('/restaurants/search_and_call', async (req, res) => {
 
     const restaurantsToCall = filteredPlaces.slice(0, actualMaxCalls);
     const mapUrl = generateStaticMapUrl(restaurantsToCall);
+    const clientRestaurants = restaurantsToCall.map(buildClientRestaurantPayload);
+    const hasMore = detailedPlaces.length > restaurantsToCall.length;
     const query = { intent, cuisine, party_size, date, time, location, timeZoneId };
 
     const batchRef = db.collection('batches').doc();
@@ -714,8 +802,9 @@ app.post('/restaurants/search_and_call', async (req, res) => {
       message: `Found ${detailedPlaces.length} eligible restaurants. Calling the top ${restaurantsToCall.length}...`,
       batchId: batchId,
       mapUrl,
-      restaurants: restaurantsToCall,
-      query
+      restaurants: clientRestaurants,
+      query,
+      hasMore
     });
   } catch (err) {
     console.error("❌ Error in /restaurants/search_and_call:", err);
@@ -772,13 +861,18 @@ app.post('/restaurants/search_more', async (req, res) => {
     });
 
     const newMapUrl = generateStaticMapUrl(nextRestaurantsToCall);
+    const clientRestaurants = nextRestaurantsToCall.map(buildClientRestaurantPayload);
+    const totalConsidered = called_count + nextRestaurantsToFilter.length;
+    const remainingAfterSlice = all_restaurants_found.slice(totalConsidered);
+    const hasMore = remainingAfterSlice.length > 0;
     res.json({
       ok: true,
       message: `Searching ${nextRestaurantsToCall.length} more restaurants...`,
       batchId: batchId,
       mapUrl: newMapUrl,
-      restaurants: nextRestaurantsToCall,
-      query
+      restaurants: clientRestaurants,
+      query,
+      hasMore
     });
 
   } catch (err) {
@@ -809,7 +903,7 @@ app.get('/status/:batchId', async (req, res) => {
       calledCount = batchDoc.data().called_count || 0;
     }
 
-    const finalStates = ['completed', 'failed', 'machine_detected', 'opt_out', 'no_reservation_line', 'booked', 'other'];
+    const finalStates = ['completed', 'failed', 'machine_detected', 'opt_out', 'no_reservation_line', 'booked', 'other', 'available', 'alternative_offered', 'no_answer'];
     const finishedCallCount = items.filter(item => finalStates.includes(item.result.outcome)).length;
     const isDone = (finishedCallCount >= calledCount) && (calledCount > 0);
 
