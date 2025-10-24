@@ -1,9 +1,9 @@
 {
   "openapi": "3.0.0",
   "info": {
-    "title": "Rezkyoo API",
+    "title": "RezKyoo API",
     "version": "1.0.0",
-    "description": "Actions for finding restaurants and making/continuing call batches for reservations."
+    "description": "Endpoints for finding restaurants, parsing user dining preferences, and starting/resuming restaurant call batches for reservations."
   },
   "servers": [
     {
@@ -11,18 +11,81 @@
     }
   ],
   "paths": {
-    "/restaurants/search_and_call": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "operationId": "healthCheck",
+        "responses": {
+          "200": {
+            "description": "Server is alive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "at": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nlp/parse_query": {
       "post": {
-        "operationId": "find_restaurants_and_call",
-        "summary": "Find nearby restaurants and start a call batch",
-        "description": "Given cuisine, location, party size, date/time, create a call batch and start dialing eligible restaurants.",
+        "summary": "Parse free-text dining mood into structured JSON + chips",
+        "operationId": "parseQuery",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SearchAndCallRequest"
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "User's natural-language description of what they are in the mood for (e.g., 'spicy noodles, $$, not sushi')"
+                  }
+                },
+                "required": ["text"]
               }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Parsed result and generated chips",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "parsed": { "type": "object" },
+                    "chips": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/restaurants/search_and_call": {
+      "post": {
+        "operationId": "findRestaurantsAndCall",
+        "summary": "Find nearby restaurants and start a call batch",
+        "description": "Creates a batch of restaurant calls based on the user's preferences, geocodes the location, filters by open hours and eligibility, then returns up to five restaurants to call.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SearchAndCallRequest" }
             }
           }
         },
@@ -31,9 +94,7 @@
             "description": "Batch created and calls started",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SearchAndCallResponse"
-                }
+                "schema": { "$ref": "#/components/schemas/SearchAndCallResponse" }
               }
             }
           },
@@ -41,24 +102,60 @@
         }
       }
     },
+    "/restaurants/search_more": {
+      "post": {
+        "operationId": "searchMore",
+        "summary": "Find additional restaurants and start a new call batch",
+        "description": "Continues searching for restaurants while avoiding duplicates from the previous batch.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "original_batch_id": { "type": "string" },
+                  "craving": { "type": "object" }
+                },
+                "required": ["original_batch_id"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New batch created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SearchAndCallResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/status/{batchId}": {
       "get": {
         "operationId": "getBatchStatus",
-        "summary": "Get the status of a call batch",
-        "description": "Poll this endpoint to get live updates on the status of each call in a batch, including final results and transcripts.",
+        "summary": "Get status of a call batch",
+        "description": "Poll for updates on each restaurant call, including final outcomes and transcripts.",
         "parameters": [
           {
             "name": "batchId",
             "in": "path",
             "required": true,
             "schema": { "type": "string" },
-            "description": "The ID of the batch to check."
+            "description": "Batch ID to check."
           }
         ],
         "responses": {
           "200": {
             "description": "Batch status retrieved",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BatchStatusResponse" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BatchStatusResponse" }
+              }
+            }
           },
           "404": { "description": "Batch not found" }
         }
@@ -69,27 +166,55 @@
     "schemas": {
       "SearchAndCallRequest": {
         "type": "object",
-        "required": ["cuisine", "location", "party_size", "date", "time"],
+        "required": ["location", "party_size", "date", "intent"],
         "properties": {
-          "cuisine": { "type": "string" },
-          "location": { "type": "string" },
-          "party_size": { "type": "integer" },
-          "date": { "type": "string" },
-          "time": { "type": "string" },
-          "intent": { "type": "string" },
-          "max_calls": { "type": "integer" }
+          "cuisine": {
+            "type": "string",
+            "description": "Cuisine preference (optional if mood provided)"
+          },
+          "location": { "type": "string", "description": "Search location" },
+          "party_size": { "type": "integer", "description": "Party size" },
+          "date": { "type": "string", "description": "Date (YYYY-MM-DD)" },
+          "time": {
+            "type": "string",
+            "description": "Time (HH:MM 24h). Required only if intent = 'specific_time'."
+          },
+          "intent": {
+            "type": "string",
+            "enum": ["next_available", "specific_time"],
+            "description": "Reservation type."
+          },
+          "craving": {
+            "type": "object",
+            "description": "Parsed craving context including NLP chips and preferences."
+          },
+          "max_calls": {
+            "type": "integer",
+            "default": 5,
+            "description": "Maximum number of concurrent calls per batch."
+          }
         }
       },
-      "SearchAndCallResponse": { "type": "object" },
-      "BookingRequest": {
+      "SearchAndCallResponse": {
         "type": "object",
         "properties": {
-          "restaurant_phone": { "type": "string" },
-          "party_size": { "type": "integer" },
-          "date": { "type": "string" },
-          "time": { "type": "string" },
-          "user_name": { "type": "string" },
-          "user_phone": { "type": "string" }
+          "batchId": { "type": "string" },
+          "mapUrl": { "type": "string" },
+          "restaurants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "rating": { "type": "number" },
+                "user_ratings_total": { "type": "integer" },
+                "formatted_phone_number": { "type": "string" },
+                "price_level": { "type": "integer" },
+                "place_id": { "type": "string" }
+              }
+            }
+          },
+          "query": { "type": "object" }
         }
       },
       "BatchStatusResponse": {
@@ -97,7 +222,20 @@
         "properties": {
           "ok": { "type": "boolean" },
           "status": { "type": "string" },
-          "items": { "type": "array", "items": { "type": "object" } }
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "phone": { "type": "string" },
+                "status": { "type": "string" },
+                "result": { "type": "object" },
+                "raw": { "type": "string" }
+              }
+            }
+          }
         }
       }
     }
